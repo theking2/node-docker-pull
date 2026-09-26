@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Docker Pull Progress</title>
+  <style>
+    body { background:#1e1e1e; color:#d4d4d4; font-family:system-ui; padding:24px; margin:0; }
+    h2 { font-weight:500; margin:0 0 16px; }
+    .controls { display:flex; gap:8px; margin-bottom:16px; }
+    input[type=text] {
+      flex:1; padding:8px 12px; background:#252526; color:#d4d4d4;
+      border:1px solid #3c3c3c; border-radius:4px; font-size:13px;
+      font-family:monospace;
+    }
+    input[type=text]:focus { outline:none; border-color:#2196f3; }
+    button { background:#2196f3; color:#fff; border:none; padding:8px 16px;
+             border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    #dialog { background:#252526; border:1px solid #3c3c3c; border-radius:6px;
+              padding:16px; font-family:monospace; font-size:12px;
+              max-height:70vh; overflow-y:auto; min-height:120px; }
+    .progress-track { background:#1a1a1a; border-radius:4px; height:10px;
+                      overflow:hidden; margin:8px 0; border:1px solid #3c3c3c; }
+    .progress-fill { height:100%; background:linear-gradient(90deg,#4caf50,#8bc34a);
+                     transition:width .25s ease; width:0; }
+    .layer { display:flex; justify-content:space-between; padding:3px 0;
+             font-size:11.5px; border-bottom:1px solid rgba(255,255,255,.04); }
+    .layer.done { color:#808080; }
+    .layer.active { color:#ffc107; }
+    .layer .status { color:#808080; }
+    .error { color:#f44336; }
+    .ok { color:#4caf50; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h2>Docker Pull Progress</h2>
+
+  <div class="controls">
+    <input type="text" id="imageInput"
+           placeholder="image:tag  (e.g. mariadb:latest)"
+           value="mariadb:latest">
+    <button id="startBtn">Pull</button>
+  </div>
+
+  <div id="dialog">Enter an image name and click Pull.</div>
+
+  <script>
+    class DockerPullRenderer {
+      constructor(el) {
+        this.el = el; this.layers = new Map();
+        this.status = 'Initializing...'; this.done = false; this.error = null;
+      }
+      write(event) {
+        if (!event.id) {
+          const s = event.status || '';
+          if (/error|failed|denied|timeout/i.test(s)) this.error = s;
+          else if (s) this.status = s.replace(/^Status:\s*/, '');
+          if (/Downloaded newer image|Image is up to date/i.test(s)) this.done = true;
+          this.render(); return;
+        }
+        const l = this.layers.get(event.id) || {
+          id: event.id, status: 'waiting', current: 0, total: 0, done: false };
+        l.status = event.status;
+        if (event.progressDetail) {
+          l.current = event.progressDetail.current || l.current;
+          l.total = event.progressDetail.total || l.total;
+        }
+        if (/Pull complete|Download complete|Already exists/i.test(event.status)) l.done = true;
+        this.layers.set(event.id, l); this.render();
+      }
+      percent() {
+        const all = [...this.layers.values()];
+        const withTotals = all.filter(l => l.total > 0);
+        if (withTotals.length) {
+          const cur = withTotals.reduce((s, l) => s + l.current, 0);
+          const tot = withTotals.reduce((s, l) => s + l.total, 0);
+          return Math.min(100, Math.round((cur / tot) * 100));
+        }
+        if (!all.length) return 0;
+        return Math.round(all.filter(l => l.done).length / all.length * 100);
+      }
+      render() {
+        if (this.error) {
+          this.el.innerHTML = `<div class="error">ERROR: ${this.error}</div>`; return;
+        }
+        const p = this.percent();
+        let html = `<div>${this.status}</div>
+          <div class="progress-track"><div class="progress-fill" style="width:${p}%"></div></div>
+          <div style="display:flex;justify-content:space-between;color:#808080">
+            <span>${this.layers.size} layers</span><span>${p}%</span></div>`;
+        for (const l of this.layers.values()) {
+          const cls = l.done ? 'done' : (l.status === 'waiting' ? '' : 'active');
+          const icon = l.done ? '✓' : (l.status === 'waiting' ? '·' : '⟳');
+          const mb = l.current ? (l.current / 1e6).toFixed(1) + ' MB' : '';
+          html += `<div class="layer ${cls}">
+            <span>${icon} ${l.id.slice(0, 12)}</span>
+            <span class="status">${l.status} ${mb}</span></div>`;
+        }
+        if (this.done) html += `<div class="ok">✅ Pull complete</div>`;
+        this.el.innerHTML = html;
+      }
+    }
+
+    const dialog = document.getElementById('dialog');
+    const btn = document.getElementById('startBtn');
+    const input = document.getElementById('imageInput');
+    const renderer = new DockerPullRenderer(dialog);
+
+    function parseImage(str) {
+      // Split "name:tag" — handle registry hosts with ports (host:5000/img:tag)
+      const idx = str.lastIndexOf(':');
+      if (idx > -1 && !str.slice(idx).includes('/')) {
+        return { image: str.slice(0, idx), tag: str.slice(idx + 1) };
+      }
+      return { image: str, tag: 'latest' };
+    }
+
+    btn.addEventListener('click', () => {
+      const raw = input.value.trim();
+      if (!raw) return;
+
+      const { image, tag } = parseImage(raw);
+
+      btn.disabled = true;
+      renderer.layers.clear();
+      renderer.status = `Starting pull for ${image}:${tag}...`;
+      renderer.done = false;
+      renderer.error = null;
+      renderer.render();
+
+      const url = `/api/pull?image=${encodeURIComponent(image)}&tag=${encodeURIComponent(tag)}`;
+      const es = new EventSource(url);
+
+      es.addEventListener('progress', (e) => renderer.write(JSON.parse(e.data)));
+      es.addEventListener('done', () => {
+        renderer.done = true; renderer.render(); es.close(); btn.disabled = false;
+      });
+      es.addEventListener('error', (e) => {
+        if (e.data) { try { renderer.error = JSON.parse(e.data).message; } catch(_) {} }
+        renderer.render(); es.close(); btn.disabled = false;
+      });
+    });
+
+    // Allow pressing Enter in the input to trigger the pull
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !btn.disabled) btn.click();
+    });
+  </script>
+</body>
+</html>

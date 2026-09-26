@@ -1,0 +1,13 @@
+{
+  "name": "app-two",
+  "version": "1.0.0",
+  "description": "Test Node server for OMV multi-app setup",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dockerode": "^4.0.2"
+  }
+}
